@@ -1,3 +1,11 @@
+variable "cluster_name" {
+  type = string
+}
+
+variable "region" {
+  type = string
+}
+
 variable "grafana_admin_password" {
   type    = string
   default = null

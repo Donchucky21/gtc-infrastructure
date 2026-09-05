@@ -1,3 +1,4 @@
+#Requires -Version 7.4
 param(
   [string]$Namespace = "monitoring",
   [string]$StorageClassName = "gp3",
@@ -14,10 +15,12 @@ param(
   [string]$OtelRelease    = "otel",
 
   # Your chosen Grafana admin password (retained across redeploys)
-  [string]$GrafanaAdminPassword = "BM950V3anKCLkUAMjJEUXCPwC0wDlv5SsCktwkRv"
+  [Parameter(Mandatory = $true)]
+  [string]$GrafanaAdminPassword
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
 Set-StrictMode -Version Latest
 
 function Assert-Cmd($name) {
@@ -41,31 +44,11 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts | Out-Null
 helm repo update | Out-Null
 
-# Uninstall existing releases if present
-Write-Host "==> Uninstalling existing releases (ignore if missing)..."
-foreach ($r in @($LokiRelease, $GrafanaRelease, $PromRelease, $TempoRelease, $OtelRelease)) {
-  try { helm uninstall $r -n $Namespace | Out-Null; Write-Host "   - Uninstalled $r" }
-  catch { Write-Host "   - $r not found / already removed" }
+# Preserve existing releases and persistent volumes on repeat applies.
+$existingNamespace = kubectl get namespace $Namespace --ignore-not-found -o name
+if ([string]::IsNullOrWhiteSpace($existingNamespace)) {
+  kubectl create namespace $Namespace | Out-Null
 }
-
-# Delete namespace to drop PVCs
-Write-Host "==> Deleting namespace '$Namespace' (drops PVCs so new StorageClass is used)..."
-kubectl delete namespace $Namespace --ignore-not-found | Out-Null
-
-# Wait for namespace deletion
-$timeoutSec = 420
-$sw = [Diagnostics.Stopwatch]::StartNew()
-while ($sw.Elapsed.TotalSeconds -lt $timeoutSec) {
-  $exists = (kubectl get ns $Namespace --ignore-not-found 2>$null | Select-String -Pattern "^$Namespace\s") -ne $null
-  if (-not $exists) { break }
-  Start-Sleep -Seconds 5
-}
-if ($sw.Elapsed.TotalSeconds -ge $timeoutSec) {
-  throw "Namespace deletion timed out. If stuck, check for finalizers in '$Namespace'."
-}
-
-Write-Host "==> Creating namespace '$Namespace'..."
-kubectl create namespace $Namespace | Out-Null
 
 # Temp directory for values
 $tempDir = Join-Path $env:TEMP ("monitoring-redeploy-" + [guid]::NewGuid().ToString("n"))
@@ -289,31 +272,36 @@ Write-Host "==> Values files created in: $tempDir"
 Write-Host "==> Installing Loki + Promtail..."
 helm upgrade --install $LokiRelease grafana/loki-stack `
   -n $Namespace `
-  -f $lokiValues
+  -f $lokiValues `
+  --atomic --wait --timeout 10m
 
 # Install Prometheus stack
 Write-Host "==> Installing Prometheus (kube-prometheus-stack)..."
 helm upgrade --install $PromRelease prometheus-community/kube-prometheus-stack `
   -n $Namespace `
-  -f $promValues
+  -f $promValues `
+  --atomic --wait --timeout 10m
 
 # Install Tempo
 Write-Host "==> Installing Tempo..."
 helm upgrade --install $TempoRelease grafana/tempo `
   -n $Namespace `
-  -f $tempoValues
+  -f $tempoValues `
+  --atomic --wait --timeout 10m
 
 # Install OpenTelemetry Collector
 Write-Host "==> Installing OpenTelemetry Collector..."
 helm upgrade --install $OtelRelease open-telemetry/opentelemetry-collector `
   -n $Namespace `
-  -f $otelValues
+  -f $otelValues `
+  --atomic --wait --timeout 10m
 
 # Install Grafana
 Write-Host "==> Installing Grafana..."
 helm upgrade --install $GrafanaRelease grafana/grafana `
   -n $Namespace `
-  -f $grafanaValues
+  -f $grafanaValues `
+  --atomic --wait --timeout 10m
 
 Write-Host ""
 Write-Host "==> Pods:"
@@ -334,7 +322,7 @@ Write-Host "  then open http://localhost:3000"
 Write-Host ""
 Write-Host "==> Grafana login:"
 Write-Host "  user: admin"
-Write-Host "  pass: $GrafanaAdminPassword"
+Write-Host "  Retrieve the password from the sensitive Terraform output grafana_admin_password."
 Write-Host ""
 Write-Host "==> Java auto-instrumentation example for your application Deployment:"
 Write-Host "  Add the OpenTelemetry Java agent to the container image or mount it with an initContainer."

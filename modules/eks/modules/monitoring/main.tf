@@ -27,8 +27,10 @@ resource "null_resource" "monitoring_redeploy" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["PowerShell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+    interpreter = ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
     command     = <<-EOT
+      aws eks update-kubeconfig --name $env:EKS_CLUSTER_NAME --region $env:AWS_REGION
+      if ($LASTEXITCODE -ne 0) { throw "Failed to configure EKS kubeconfig" }
       & "${local.monitoring_script_path}" `
         -Namespace "${local.namespace}" `
         -StorageClassName "${var.storage_class_name}" `
@@ -46,6 +48,8 @@ resource "null_resource" "monitoring_redeploy" {
 
     environment = {
       GRAFANA_ADMIN_PASSWORD = local.grafana_admin_password
+      EKS_CLUSTER_NAME       = var.cluster_name
+      AWS_REGION             = var.region
     }
   }
 }

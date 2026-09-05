@@ -18,11 +18,10 @@ env:
   TF_INPUT: "false"
   TF_WORKING_DIR: workspaces/eks
   AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
-  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'ap-infra-prod' }}
   TF_VAR_eks_admin_principal_arns: '["${{ secrets.AWS_ROLE_TO_ASSUME }}"]'
-  TF_VAR_github_runner_config_url: ${{ vars.GITHUB_RUNNER_CONFIG_URL || 'https://github.com/africa-prudential' }}
-  TF_VAR_github_runner_token: ${{ secrets.EKS_GITHUB_RUNNER_TOKEN }}
-  TF_VAR_github_runner_scale_set_name: ${{ vars.GITHUB_RUNNER_SCALE_SET_NAME || 'ap-infra-eks-runner' }}
+  # TF_VAR_github_runner_config_url: ${{ vars.GITHUB_RUNNER_CONFIG_URL || 'https://github.com/africa-prudential' }}
+  # TF_VAR_github_runner_token: ${{ secrets.EKS_GITHUB_RUNNER_TOKEN }}
+  # TF_VAR_github_runner_scale_set_name: ${{ vars.GITHUB_RUNNER_SCALE_SET_NAME || 'ap-infra-eks-runner' }}
   # TF_VAR_backstage_catalog_locations: ${{ vars.BACKSTAGE_CATALOG_LOCATIONS_JSON || '[]' }}
 
 jobs:
@@ -40,7 +39,6 @@ jobs:
           Write-Host "Apply requested: ${{ github.event.inputs.apply }}"
           $missing = @()
           if ([string]::IsNullOrWhiteSpace("${{ secrets.AWS_ROLE_TO_ASSUME }}")) { $missing += "secret AWS_ROLE_TO_ASSUME" }
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.EKS_GITHUB_RUNNER_TOKEN }}")) { $missing += "secret EKS_GITHUB_RUNNER_TOKEN" }
           if ($missing.Count -gt 0) {
             throw "Missing GitHub Actions configuration: $($missing -join ', ')"
           }
@@ -68,18 +66,11 @@ jobs:
         run: terraform init -input=false
 
       - name: Terraform fmt check
-        run: terraform fmt -check -recursive
+        run: terraform fmt -check -recursive workspaces/eks modules/eks modules/route53_zone
 
       - name: Terraform validate
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform validate
-
-      - name: Configure kubeconfig if cluster already exists
-        working-directory: ${{ env.TF_WORKING_DIR }}
-        shell: pwsh
-        run: |
-          aws eks update-kubeconfig --region $env:AWS_REGION --name $env:EKS_CLUSTER_NAME
-        continue-on-error: true
 
       - name: Terraform plan
         working-directory: ${{ env.TF_WORKING_DIR }}

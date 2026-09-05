@@ -23,8 +23,8 @@ module "eks" {
 
   cluster_name         = local.name
   kubernetes_version   = var.eks_cluster_version
-  vpc_id               = "vpc-055828eab3400e03c"
-  subnet_ids           = ["subnet-0b9a27d1aa75a4dc2", "subnet-0aef599c2d79bdf5e", "subnet-0954bbd39e787aa35"]
+  vpc_id               = "vpc-0c03955c56c103755"
+  subnet_ids           = ["subnet-07f45113a08dd0a02", "subnet-015c20ac1020f0154"]
   min_nodes            = var.min_nodes
   max_nodes            = var.max_nodes
   desired_size         = var.desired_size
@@ -96,24 +96,27 @@ module "external_secrets" {
   depends_on = [module.eks, module.aws_load_balancer_controller]
 }
 
-module "github_actions_runner" {
-  source = "../../modules/eks/modules/github_actions_runner"
+# module "github_actions_runner" {
+#   source = "../../modules/eks/modules/github_actions_runner"
 
-  github_config_url     = var.github_runner_config_url
-  github_token          = var.github_runner_token
-  runner_scale_set_name = var.github_runner_scale_set_name
-  min_runners           = var.github_runner_min_runners
-  max_runners           = var.github_runner_max_runners
+#   github_config_url     = var.github_runner_config_url
+#   github_token          = var.github_runner_token
+#   runner_scale_set_name = var.github_runner_scale_set_name
+#   min_runners           = var.github_runner_min_runners
+#   max_runners           = var.github_runner_max_runners
 
-  providers = {
-    helm = helm
-  }
+#   providers = {
+#     helm = helm
+#   }
 
-  depends_on = [module.eks, module.aws_load_balancer_controller]
-}
+#   depends_on = [module.eks, module.aws_load_balancer_controller]
+# }
 
 module "monitoring" {
   source = "../../modules/eks/modules/monitoring"
+
+  cluster_name = module.eks.cluster_name
+  region       = local.region
 
   depends_on = [module.eks, module.ebs_csi_driver, module.aws_load_balancer_controller]
 }

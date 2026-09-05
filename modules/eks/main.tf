@@ -22,9 +22,7 @@ module "eks" {
   kubernetes_version = var.kubernetes_version
 
   addons = {
-    coredns = {
-      before_compute = true
-    }
+    coredns = {}
     eks-pod-identity-agent = {
       before_compute = true
     }
