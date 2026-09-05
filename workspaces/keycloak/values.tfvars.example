@@ -1,0 +1,26 @@
+region           = "eu-west-2"
+eks_cluster_name = "ap-prod"
+
+zone     = "mygreenpole.com"
+hostname = "keycloak.mygreenpole.com"
+image    = "quay.io/keycloak/keycloak:26.3.3"
+
+admin_user                = "admin"
+admin_secret_name         = "keycloak-admin-creds"
+admin_password_secret_key = "admin-password"
+
+database_host                = "your-rds-endpoint.eu-west-2.rds.amazonaws.com"
+database_port                = 5432
+database_name                = "keycloak"
+database_schema              = "public"
+database_secret_name         = "keycloak-db-creds"
+database_username_secret_key = "username"
+database_password_secret_key = "password"
+
+ingress_group_name         = "mygreenpole-com"
+ingress_group_order        = "20"
+ingress_load_balancer_name = "mygreenpole-com-alb"
+ingress_certificate_arn    = "arn:aws:acm:eu-west-2:825765408263:certificate/9a70b7b2-5213-4ac9-a0f5-9fa6ae868974"
+ingress_listen_ports       = "[{\"HTTP\": 80}, {\"HTTPS\": 443}]"
+ingress_backend_protocol   = "HTTP"
+ingress_success_codes      = "200-399,404"

@@ -1,0 +1,123 @@
+name: Terraform Keycloak Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Run terraform apply after plan"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_WORKING_DIR: workspaces/keycloak
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'ap-prod' }}
+  TF_VAR_region: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  TF_VAR_eks_cluster_name: ${{ vars.EKS_CLUSTER_NAME || 'ap-prod' }}
+  TF_VAR_database_host: ${{ vars.KEYCLOAK_DATABASE_HOST }}
+  TF_VAR_database_name: ${{ vars.KEYCLOAK_DATABASE_NAME || 'keycloak' }}
+  TF_VAR_admin_secret_name: ${{ vars.KEYCLOAK_ADMIN_SECRET_NAME || 'keycloak-admin-creds' }}
+  TF_VAR_database_secret_name: ${{ vars.KEYCLOAK_DATABASE_SECRET_NAME || 'keycloak-db-creds' }}
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required configuration
+        shell: pwsh
+        run: |
+          Write-Host "Apply requested: ${{ github.event.inputs.apply }}"
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.AWS_ROLE_TO_ASSUME }}")) { $missing += "secret AWS_ROLE_TO_ASSUME" }
+          if ([string]::IsNullOrWhiteSpace("${{ env.EKS_CLUSTER_NAME }}")) { $missing += "variable EKS_CLUSTER_NAME" }
+          if ([string]::IsNullOrWhiteSpace("${{ vars.KEYCLOAK_DATABASE_HOST }}")) { $missing += "variable KEYCLOAK_DATABASE_HOST" }
+          if ($missing.Count -gt 0) {
+            throw "Missing GitHub Actions configuration: $($missing -join ', ')"
+          }
+
+      - name: Configure AWS credentials from IAM role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        shell: pwsh
+        run: aws eks update-kubeconfig --region $env:AWS_REGION --name $env:EKS_CLUSTER_NAME
+
+      - name: Check Keycloak secrets
+        shell: pwsh
+        run: |
+          kubectl get namespace keycloak
+          kubectl get secret $env:TF_VAR_admin_secret_name -n keycloak
+          kubectl get secret $env:TF_VAR_database_secret_name -n keycloak
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: pwsh
+        run: |
+          terraform plan -input=false -no-color -out=tfplan
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $plan = & terraform show -no-color tfplan
+          Set-Content -Path tfplan.txt -Value $plan
+
+      - name: Write plan summary
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: pwsh
+        run: |
+          $plan = Get-Content -Path tfplan.txt -Raw
+          $summary = @(
+            "## Terraform plan"
+            '```'
+            $plan
+            '```'
+          ) -join [Environment]::NewLine
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      - name: Terraform apply
+        if: ${{ github.event.inputs.apply == 'true' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: pwsh
+        run: |
+          terraform apply -input=false -no-color -auto-approve tfplan
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Apply skipped
+        if: ${{ github.event.inputs.apply != 'true' }}
+        run: echo "Terraform apply was skipped because workflow input apply was not true."

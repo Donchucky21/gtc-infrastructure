@@ -1,0 +1,10 @@
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: platform-catalog
+  description: Platform-owned Backstage catalog entries
+spec:
+  targets:
+    - ./entities/org.yaml
+    - ./entities/system.yaml
+    - ../templates/service-golden-path/template.yaml

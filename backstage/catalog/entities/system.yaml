@@ -1,0 +1,16 @@
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: platform
+  description: Shared engineering platform
+spec:
+  owner: group:default/africa-prudential
+  domain: platform-engineering
+---
+apiVersion: backstage.io/v1alpha1
+kind: Domain
+metadata:
+  name: platform-engineering
+  description: Internal developer platform and golden paths
+spec:
+  owner: group:default/africa-prudential

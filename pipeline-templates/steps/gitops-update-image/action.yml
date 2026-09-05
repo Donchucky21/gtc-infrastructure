@@ -1,0 +1,222 @@
+name: GitOps Image Update
+description: Update a Kubernetes Deployment image in a GitOps repository and push the change for Argo CD to sync.
+
+inputs:
+  gitops-repository:
+    description: GitOps repository in owner/repo format.
+    required: true
+  gitops-token:
+    description: Token with contents read/write access to the GitOps repository.
+    required: true
+  gitops-ref:
+    description: Git branch or ref in the GitOps repository.
+    required: false
+    default: main
+  gitops-path:
+    description: Manifest file or directory inside the GitOps repository to update.
+    required: true
+  image-uri:
+    description: Full image URI to write into the Deployment. If omitted, image-registry/image-repository/image-tag are combined.
+    required: false
+    default: ""
+  image-registry:
+    description: Image registry, for example 123456789012.dkr.ecr.eu-west-2.amazonaws.com.
+    required: false
+    default: ""
+  image-repository:
+    description: Image repository, for example invearn/invearn2coreapi.
+    required: false
+    default: ""
+  image-tag:
+    description: Image tag to deploy.
+    required: false
+    default: ""
+  container-name:
+    description: Deployment container name whose image should be updated.
+    required: true
+  deployment-name:
+    description: Optional Deployment metadata.name to restrict the update.
+    required: false
+    default: ""
+  commit-message:
+    description: Commit message for the GitOps repository update.
+    required: false
+    default: ""
+  git-user-name:
+    description: Git author name for the update commit.
+    required: false
+    default: github-actions[bot]
+  git-user-email:
+    description: Git author email for the update commit.
+    required: false
+    default: github-actions[bot]@users.noreply.github.com
+  yq-version:
+    description: yq version to install.
+    required: false
+    default: v4.44.3
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout GitOps repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.gitops-repository }}
+        ref: ${{ inputs.gitops-ref }}
+        path: gitops-repo
+        token: ${{ inputs.gitops-token }}
+
+    - name: Install yq
+      shell: bash
+      env:
+        YQ_VERSION: ${{ inputs.yq-version }}
+      run: |
+        set -euo pipefail
+
+        case "$(uname -m)" in
+          x86_64|amd64) arch=amd64 ;;
+          aarch64|arm64) arch=arm64 ;;
+          *)
+            echo "Unsupported runner architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+
+        yq_path="${RUNNER_TEMP}/yq"
+        curl --fail --location --silent --show-error \
+          "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${arch}" \
+          --output "$yq_path"
+        chmod +x "$yq_path"
+        echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+    - name: Update image in GitOps manifests
+      shell: bash
+      working-directory: gitops-repo
+      env:
+        GITOPS_PATH: ${{ inputs.gitops-path }}
+        INPUT_IMAGE_URI: ${{ inputs.image-uri }}
+        IMAGE_REGISTRY: ${{ inputs.image-registry }}
+        IMAGE_REPOSITORY: ${{ inputs.image-repository }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
+        DEPLOYMENT_NAME: ${{ inputs.deployment-name }}
+      run: |
+        set -euo pipefail
+
+        if [[ -n "$INPUT_IMAGE_URI" ]]; then
+          IMAGE_URI="$INPUT_IMAGE_URI"
+        else
+          if [[ -z "$IMAGE_REGISTRY" || -z "$IMAGE_REPOSITORY" || -z "$IMAGE_TAG" ]]; then
+            echo "Provide image-uri or image-registry, image-repository, and image-tag." >&2
+            exit 1
+          fi
+          IMAGE_URI="${IMAGE_REGISTRY%/}/${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+        fi
+        export IMAGE_URI
+
+        if [[ ! -e "$GITOPS_PATH" ]]; then
+          echo "GitOps path '$GITOPS_PATH' does not exist." >&2
+          exit 1
+        fi
+
+        mapfile -t manifest_files < <(
+          if [[ -f "$GITOPS_PATH" ]]; then
+            printf '%s\n' "$GITOPS_PATH"
+          else
+            find "$GITOPS_PATH" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort
+          fi
+        )
+
+        if [[ "${#manifest_files[@]}" -eq 0 ]]; then
+          echo "No YAML manifests found under '$GITOPS_PATH'." >&2
+          exit 1
+        fi
+
+        updated_files=()
+        for manifest_file in "${manifest_files[@]}"; do
+          if [[ -n "$DEPLOYMENT_NAME" ]]; then
+            match_count="$(
+              yq eval '
+                [
+                  select(.kind == "Deployment" and .metadata.name == strenv(DEPLOYMENT_NAME))
+                  | .spec.template.spec.containers[]
+                  | select(.name == strenv(CONTAINER_NAME))
+                ] | length
+              ' "$manifest_file"
+            )"
+            if [[ "$match_count" == "0" ]]; then
+              continue
+            fi
+
+            yq eval --inplace '
+              (
+                select(.kind == "Deployment" and .metadata.name == strenv(DEPLOYMENT_NAME))
+                | .spec.template.spec.containers[]
+                | select(.name == strenv(CONTAINER_NAME))
+                | .image
+              ) = strenv(IMAGE_URI)
+            ' "$manifest_file"
+          else
+            match_count="$(
+              yq eval '
+                [
+                  select(.kind == "Deployment")
+                  | .spec.template.spec.containers[]
+                  | select(.name == strenv(CONTAINER_NAME))
+                ] | length
+              ' "$manifest_file"
+            )"
+            if [[ "$match_count" == "0" ]]; then
+              continue
+            fi
+
+            yq eval --inplace '
+              (
+                select(.kind == "Deployment")
+                | .spec.template.spec.containers[]
+                | select(.name == strenv(CONTAINER_NAME))
+                | .image
+              ) = strenv(IMAGE_URI)
+            ' "$manifest_file"
+          fi
+          updated_files+=("$manifest_file")
+        done
+
+        if [[ "${#updated_files[@]}" -eq 0 ]] || ! grep --fixed-strings --quiet "$IMAGE_URI" "${updated_files[@]}"; then
+          echo "No Deployment container named '$CONTAINER_NAME' was updated under '$GITOPS_PATH'." >&2
+          if [[ -n "$DEPLOYMENT_NAME" ]]; then
+            echo "Deployment filter was '$DEPLOYMENT_NAME'." >&2
+          fi
+          exit 1
+        fi
+
+        echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+        echo "Updated GitOps image to $IMAGE_URI"
+
+    - name: Commit and push GitOps update
+      shell: bash
+      working-directory: gitops-repo
+      env:
+        GITOPS_REF: ${{ inputs.gitops-ref }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        GIT_USER_NAME: ${{ inputs.git-user-name }}
+        GIT_USER_EMAIL: ${{ inputs.git-user-email }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
+      run: |
+        set -euo pipefail
+
+        if git diff --quiet; then
+          echo "GitOps repository already has ${CONTAINER_NAME} at ${IMAGE_URI}; nothing to commit."
+          exit 0
+        fi
+
+        git config user.name "$GIT_USER_NAME"
+        git config user.email "$GIT_USER_EMAIL"
+
+        if [[ -z "$COMMIT_MESSAGE" ]]; then
+          COMMIT_MESSAGE="chore(gitops): update ${CONTAINER_NAME} image to ${IMAGE_URI}"
+        fi
+
+        git add .
+        git commit -m "$COMMIT_MESSAGE"
+        git push origin "HEAD:${GITOPS_REF}"

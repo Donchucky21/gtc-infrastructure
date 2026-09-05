@@ -1,0 +1,120 @@
+name: Terraform Backstage Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Run terraform apply after plan"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_WORKING_DIR: workspaces/backstage
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'ap-prod' }}
+  TF_VAR_region: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  TF_VAR_eks_cluster_name: ${{ vars.EKS_CLUSTER_NAME || 'ap-prod' }}
+  TF_VAR_zone: ${{ vars.ROUTE53_ZONE || 'mygreenpole.com' }}
+  TF_VAR_backstage_hostname: ${{ vars.BACKSTAGE_HOSTNAME || 'backstage.mygreenpole.com' }}
+  TF_VAR_github_pat_token: ${{ secrets.BACKSTAGE_GITHUB_PAT_TOKEN }}
+  TF_VAR_backstage_catalog_locations: ${{ vars.BACKSTAGE_CATALOG_LOCATIONS_JSON || '[]' }}
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required configuration
+        shell: pwsh
+        run: |
+          Write-Host "Apply requested: ${{ github.event.inputs.apply }}"
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.AWS_ROLE_TO_ASSUME }}")) { $missing += "secret AWS_ROLE_TO_ASSUME" }
+          if ([string]::IsNullOrWhiteSpace("${{ env.EKS_CLUSTER_NAME }}")) { $missing += "variable EKS_CLUSTER_NAME" }
+          if ([string]::IsNullOrWhiteSpace("${{ env.TF_VAR_zone }}")) { $missing += "variable ROUTE53_ZONE" }
+          if ([string]::IsNullOrWhiteSpace("${{ env.TF_VAR_github_pat_token }}")) { $missing += "secret BACKSTAGE_GITHUB_PAT_TOKEN" }
+          if ($missing.Count -gt 0) {
+            throw "Missing GitHub Actions configuration: $($missing -join ', ')"
+          }
+
+      - name: Configure AWS credentials from IAM role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: pwsh
+        run: |
+          terraform plan -input=false -no-color -out=tfplan
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $plan = & terraform show -no-color tfplan
+          Set-Content -Path tfplan.txt -Value $plan
+
+      - name: Write plan summary
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: pwsh
+        run: |
+          if (Test-Path tfplan.txt) {
+            $plan = Get-Content -Path tfplan.txt -Raw
+          } else {
+            $plan = terraform show -no-color tfplan
+          }
+          $summary = @(
+            "## Terraform plan"
+            '```'
+            $plan
+            '```'
+          ) -join [Environment]::NewLine
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      - name: Terraform apply
+        if: ${{ github.event.inputs.apply == 'true' }}
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        shell: pwsh
+        run: |
+          terraform apply -input=false -no-color -auto-approve tfplan
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Apply skipped
+        if: ${{ github.event.inputs.apply != 'true' }}
+        run: echo "Terraform apply was skipped because workflow input apply was not true."

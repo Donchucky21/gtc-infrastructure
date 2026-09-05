@@ -1,0 +1,20 @@
+jobs:
+  trivy-sbom:
+    name: Trivy SBOM Upload
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate and upload SBOM
+        uses: africa-prudential/ap-infra/pipeline-templates/steps/trivy-dependency-track@main
+        with:
+          scan-type: fs
+          scan-ref: .
+          project-name: ${{ github.event.repository.name }}
+          project-version: ${{ github.sha }}
+          parent-name: greenpole
+          parent-version: "1"
+          dependency-track-url: https://dependency-track-api.mygreenpole.com
+          dependency-track-api-key: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}

@@ -1,0 +1,323 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dependency-track
+  namespace: dependency-track
+automountServiceAccountToken: true
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dependency-track-data
+  namespace: dependency-track
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dependency-track-api-server
+  namespace: dependency-track
+  labels:
+    app.kubernetes.io/name: dependency-track-api-server
+    app.kubernetes.io/instance: dependency-track
+    app.kubernetes.io/component: api-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dependency-track-api-server
+    app.kubernetes.io/instance: dependency-track
+    app.kubernetes.io/component: api-server
+  ports:
+    - name: web
+      port: 8080
+      targetPort: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dependency-track-frontend
+  namespace: dependency-track
+  labels:
+    app.kubernetes.io/name: dependency-track-frontend
+    app.kubernetes.io/instance: dependency-track
+    app.kubernetes.io/component: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dependency-track-frontend
+    app.kubernetes.io/instance: dependency-track
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: web
+      port: 8080
+      targetPort: web
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dependency-track-frontend
+  namespace: dependency-track
+  annotations:
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-west-2:825765408263:certificate/9a70b7b2-5213-4ac9-a0f5-9fa6ae868974
+    alb.ingress.kubernetes.io/group.name: mygreenpole-com
+    alb.ingress.kubernetes.io/group.order: "10"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/load-balancer-name: mygreenpole-com-alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/success-codes: 200-399,404
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    external-dns.alpha.kubernetes.io/hostname: dependency-track.mygreenpole.com
+spec:
+  ingressClassName: alb
+  rules:
+    - host: dependency-track.mygreenpole.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dependency-track-frontend
+                port:
+                  name: web
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dependency-track-api
+  namespace: dependency-track
+  annotations:
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-west-2:825765408263:certificate/9a70b7b2-5213-4ac9-a0f5-9fa6ae868974
+    alb.ingress.kubernetes.io/group.name: mygreenpole-com
+    alb.ingress.kubernetes.io/group.order: "10"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/load-balancer-name: mygreenpole-com-alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/success-codes: 200-399,404
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    external-dns.alpha.kubernetes.io/hostname: dependency-track-api.mygreenpole.com
+spec:
+  ingressClassName: alb
+  rules:
+    - host: dependency-track-api.mygreenpole.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dependency-track-api-server
+                port:
+                  name: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dependency-track-api-server
+  namespace: dependency-track
+  labels:
+    app.kubernetes.io/name: dependency-track-api-server
+    app.kubernetes.io/instance: dependency-track
+    app.kubernetes.io/component: api-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dependency-track-api-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dependency-track-api-server
+        app.kubernetes.io/instance: dependency-track
+        app.kubernetes.io/component: api-server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9000"
+  
+    spec:
+      serviceAccountName: dependency-track
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: "OnRootMismatch"
+
+      containers:
+        - name: api-server
+          image: dependencytrack/apiserver:5.0.0
+          imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: DT_METRICS_ENABLED
+              value: "true"
+            - name: DT_INIT_TASKS_ENABLED
+              value: "true"
+            - name: DT_DATASOURCE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: dt-creds
+                  key: DT_DATASOURCE_URL
+            - name: DT_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: dt-creds
+                  key: DT_DATASOURCE_USERNAME
+            - name: DT_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dt-creds
+                  key: DT_DATASOURCE_PASSWORD
+            - name: DT_OIDC_ENABLED
+              value: "true"
+            - name: DT_OIDC_CLIENT_ID
+              value: dependency-track
+            - name: DT_OIDC_ISSUER
+              value: https://keycloak.mygreenpole.com/realms/Africa-Prudential
+            - name: DT_OIDC_USERNAME_CLAIM
+              value: preferred_username
+            - name: DT_OIDC_TEAMS_CLAIM
+              value: groups
+            - name: DT_OIDC_USER_PROVISIONING
+              value: "true"
+            - name: DT_OIDC_TEAM_SYNCHRONIZATION
+              value: "true"
+          ports:
+            - name: web
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /health/started
+              port: management
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dependency-track-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dependency-track-frontend
+  namespace: dependency-track
+  labels:
+    app.kubernetes.io/name: dependency-track-frontend
+    app.kubernetes.io/instance: dependency-track
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dependency-track-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dependency-track-frontend
+        app.kubernetes.io/instance: dependency-track
+        app.kubernetes.io/component: frontend
+    spec:
+      serviceAccountName: dependency-track
+      containers:
+        - name: frontend
+          image: dependencytrack/frontend:5.0.0
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: API_BASE_URL
+              value: https://dependency-track-api.mygreenpole.com
+            - name: OIDC_CLIENT_ID
+              value: dependency-track
+            - name: OIDC_ISSUER
+              value: https://keycloak.mygreenpole.com/realms/Africa-Prudential
+            - name: OIDC_SCOPE
+              value: openid profile email groups
+            - name: OIDC_LOGIN_BUTTON_TEXT
+              value: Login with SSO
+          ports:
+            - name: web
+              containerPort: 8080
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /
+              port: web
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: web
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 150m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}

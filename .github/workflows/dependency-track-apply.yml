@@ -1,0 +1,105 @@
+name: Dependency-Track Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply Kubernetes manifests"
+        required: true
+        default: false
+        type: boolean
+      cleanup_helm_release:
+        description: "One-time cleanup of the old Helm release before applying manifests"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'ap-prod' }}
+  NAMESPACE: dependency-track
+  DB_SECRET_NAME: ${{ vars.DEPENDENCY_TRACK_DB_SECRET_NAME || 'dt-creds' }}
+  MANIFEST_DIR: workspaces/dependency-track/k8s
+
+jobs:
+  apply:
+    name: Apply
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          if [[ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]]; then missing+=("secret AWS_ROLE_TO_ASSUME"); fi
+          if [[ -z "${EKS_CLUSTER_NAME}" ]]; then missing+=("variable EKS_CLUSTER_NAME"); fi
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            printf 'Missing GitHub Actions configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Configure AWS credentials from IAM role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Setup Helm for optional cleanup
+        if: ${{ github.event.inputs.cleanup_helm_release == 'true' }}
+        uses: azure/setup-helm@v4
+
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
+      - name: Optional Helm cleanup
+        if: ${{ github.event.inputs.cleanup_helm_release == 'true' && github.event.inputs.apply == 'true' }}
+        run: |
+          set -euo pipefail
+          helm uninstall dependency-track -n "$NAMESPACE" || true
+          kubectl delete deploy dependency-track-api-server dependency-track-frontend -n "$NAMESPACE" --ignore-not-found
+          kubectl wait --for=delete deploy/dependency-track-api-server -n "$NAMESPACE" --timeout=5m || true
+          kubectl wait --for=delete deploy/dependency-track-frontend -n "$NAMESPACE" --timeout=5m || true
+
+      - name: Check database secret
+        run: |
+          set -euo pipefail
+          kubectl get namespace "$NAMESPACE" || kubectl create namespace "$NAMESPACE"
+          kubectl get secret "$DB_SECRET_NAME" -n "$NAMESPACE"
+
+      - name: Validate manifests
+        run: |
+          set -euo pipefail
+          kubectl apply --dry-run=server -f "$MANIFEST_DIR/base.yaml"
+
+      - name: Apply base resources
+        if: ${{ github.event.inputs.apply == 'true' }}
+        run: |
+          set -euo pipefail
+          kubectl apply -f "$MANIFEST_DIR/base.yaml"
+
+      - name: Wait for rollout
+        if: ${{ github.event.inputs.apply == 'true' }}
+        run: |
+          set -euo pipefail
+          kubectl rollout status deploy/dependency-track-api-server -n "$NAMESPACE" --timeout=10m
+          kubectl rollout status deploy/dependency-track-frontend -n "$NAMESPACE" --timeout=10m
+
+      - name: Show resources
+        if: ${{ github.event.inputs.apply == 'true' }}
+        run: |
+          kubectl get pods,svc,ingress -n "$NAMESPACE"
+
+      - name: Apply skipped
+        if: ${{ github.event.inputs.apply != 'true' }}
+        run: echo "Apply skipped. Server-side dry-run completed."

@@ -1,0 +1,10 @@
+apiVersion: backstage.io/v1alpha1
+kind: Group
+metadata:
+  name: africa-prudential
+  description: Africa Prudential engineering
+spec:
+  type: organization
+  profile:
+    displayName: Africa Prudential
+  children: []

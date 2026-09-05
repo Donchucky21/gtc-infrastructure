@@ -1,0 +1,165 @@
+name: Trivy SBOM Dependency-Track Upload
+description: Generate a CycloneDX SBOM with Trivy and upload it to Dependency-Track.
+
+inputs:
+  scan-type:
+    description: Trivy scan type. Common values are fs, image, rootfs, repo.
+    required: false
+    default: fs
+  scan-ref:
+    description: Path, image reference, repository URL, or rootfs path to scan.
+    required: false
+    default: .
+  project-name:
+    description: Dependency-Track project name.
+    required: true
+  project-version:
+    description: Dependency-Track project version.
+    required: true
+  parent-name:
+    description: Optional Dependency-Track parent project name, for example greenpole or sabivest.
+    required: false
+    default: ""
+  parent-version:
+    description: Optional Dependency-Track parent project version. Required by Dependency-Track when parent-name is used.
+    required: false
+    default: ""
+  dependency-track-url:
+    description: Dependency-Track base URL, for example https://dependency-track-api.mygreenpole.com.
+    required: true
+  dependency-track-api-key:
+    description: Dependency-Track API key with BOM upload permission.
+    required: true
+  bom-file:
+    description: SBOM file path.
+    required: false
+    default: trivy-sbom.cdx.json
+  cyclonedx-spec-version:
+    description: CycloneDX specVersion to write before upload. Dependency-Track 5.0.0 rejects Trivy's current 1.7 output, so this defaults to 1.6.
+    required: false
+    default: "1.6"
+  trivy-version:
+    description: Trivy version to install. Leave empty to use the action default.
+    required: false
+    default: ""
+  artifact-name:
+    description: Uploaded GitHub Actions artifact name for the generated SBOM.
+    required: false
+    default: trivy-cyclonedx-sbom
+  upload-artifact:
+    description: Upload the generated SBOM as a GitHub Actions artifact.
+    required: false
+    default: "true"
+  auto-create:
+    description: Auto-create the Dependency-Track project if it does not exist.
+    required: false
+    default: "true"
+  fail-on-upload-error:
+    description: Fail the workflow if Dependency-Track upload fails.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Generate CycloneDX SBOM
+      uses: aquasecurity/trivy-action@v0.35.0
+      with:
+        scan-type: ${{ inputs.scan-type }}
+        scan-ref: ${{ inputs.scan-ref }}
+        format: cyclonedx
+        output: ${{ inputs.bom-file }}
+        version: ${{ inputs.trivy-version }}
+
+    - name: Normalize CycloneDX spec version
+      if: ${{ inputs.cyclonedx-spec-version != '' }}
+      shell: bash
+      env:
+        BOM_FILE: ${{ inputs.bom-file }}
+        CYCLONEDX_SPEC_VERSION: ${{ inputs.cyclonedx-spec-version }}
+      run: |
+        set -euo pipefail
+
+        python3 - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        bom_file = Path(os.environ["BOM_FILE"])
+        spec_version = os.environ["CYCLONEDX_SPEC_VERSION"]
+
+        with bom_file.open("r", encoding="utf-8") as file:
+            bom = json.load(file)
+
+        original_spec_version = bom.get("specVersion", "")
+        bom["specVersion"] = spec_version
+
+        with bom_file.open("w", encoding="utf-8") as file:
+            json.dump(bom, file, separators=(",", ":"))
+
+        print(f"Normalized CycloneDX specVersion from '{original_spec_version}' to '{spec_version}'.")
+        PY
+
+    - name: Upload SBOM artifact
+      if: ${{ inputs.upload-artifact == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.bom-file }}
+        if-no-files-found: error
+
+    - name: Upload SBOM to Dependency-Track
+      shell: bash
+      env:
+        DEPENDENCY_TRACK_URL: ${{ inputs.dependency-track-url }}
+        DEPENDENCY_TRACK_API_KEY: ${{ inputs.dependency-track-api-key }}
+        PROJECT_NAME: ${{ inputs.project-name }}
+        PROJECT_VERSION: ${{ inputs.project-version }}
+        PARENT_NAME: ${{ inputs.parent-name }}
+        PARENT_VERSION: ${{ inputs.parent-version }}
+        BOM_FILE: ${{ inputs.bom-file }}
+        AUTO_CREATE: ${{ inputs.auto-create }}
+        FAIL_ON_UPLOAD_ERROR: ${{ inputs.fail-on-upload-error }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -s "$BOM_FILE" ]]; then
+          echo "SBOM file '$BOM_FILE' was not created or is empty." >&2
+          exit 1
+        fi
+
+        parent_args=()
+        if [[ -n "$PARENT_NAME" ]]; then
+          if [[ -z "$PARENT_VERSION" ]]; then
+            echo "parent-version is required when parent-name is set." >&2
+            exit 1
+          fi
+
+          parent_args=(
+            --form "parentName=${PARENT_NAME}"
+            --form "parentVersion=${PARENT_VERSION}"
+          )
+        fi
+
+        response_file="$(mktemp)"
+        status_code="$(
+          curl --silent --show-error \
+            --output "$response_file" \
+            --write-out "%{http_code}" \
+            --request POST "${DEPENDENCY_TRACK_URL%/}/api/v1/bom" \
+            --header "X-Api-Key: ${DEPENDENCY_TRACK_API_KEY}" \
+            --form "autoCreate=${AUTO_CREATE}" \
+            --form "projectName=${PROJECT_NAME}" \
+            --form "projectVersion=${PROJECT_VERSION}" \
+            "${parent_args[@]}" \
+            --form "bom=@${BOM_FILE}"
+        )"
+
+        echo "Dependency-Track upload returned HTTP ${status_code}."
+
+        if [[ "$status_code" -lt 200 || "$status_code" -gt 299 ]]; then
+          cat "$response_file" >&2
+          if [[ "$FAIL_ON_UPLOAD_ERROR" == "true" ]]; then
+            exit 1
+          fi
+        fi
