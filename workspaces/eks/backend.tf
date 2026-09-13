@@ -2,10 +2,12 @@
 # # make s3 bucket for terraform state
 terraform {
   backend "s3" {
-    bucket         = "terraform-state-bucket-victory"
-    key            = "new-dev"
+    bucket         = "chuckys-remote-state"
+    key            = "eks/dev/terraform.tfstate"
     region         = "eu-west-2"
-    dynamodb_table = "terraform-state-locks-victory"
+    use_lockfile   = true
+    # dynamodb_table = "gtc-terraform-state-locks"
+    encrypt        = true
   }
 }
 

@@ -18,7 +18,7 @@ env:
   TF_INPUT: "false"
   TF_WORKING_DIR: workspaces/eks
   AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
-  TF_VAR_eks_admin_principal_arns: '["${{ secrets.AWS_ROLE_TO_ASSUME }}"]'
+  TF_VAR_eks_admin_principal_arns: '["${{ secrets.AWS_ROLE_TO_ASSUME }}", "${{ vars.EKS_ADMIN_USER_ARN }}"]'
   # TF_VAR_github_runner_config_url: ${{ vars.GITHUB_RUNNER_CONFIG_URL || 'https://github.com/africa-prudential' }}
   # TF_VAR_github_runner_token: ${{ secrets.EKS_GITHUB_RUNNER_TOKEN }}
   # TF_VAR_github_runner_scale_set_name: ${{ vars.GITHUB_RUNNER_SCALE_SET_NAME || 'ap-infra-eks-runner' }}
