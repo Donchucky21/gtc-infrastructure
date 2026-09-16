@@ -21,15 +21,18 @@ module "vpc" {
 module "eks" {
   source = "../../modules/eks"
 
-  cluster_name         = local.name
-  kubernetes_version   = var.eks_cluster_version
-  vpc_id               = module.vpc.vpc_id
-  subnet_ids           = module.vpc.private_subnets
-  min_nodes            = var.min_nodes
-  max_nodes            = var.max_nodes
-  desired_size         = var.desired_size
-  admin_principal_arns = var.eks_admin_principal_arns
-  tags                 = local.tags
+  cluster_name       = local.name
+  kubernetes_version = var.eks_cluster_version
+  vpc_id             = module.vpc.vpc_id
+  subnet_ids         = module.vpc.private_subnets
+  min_nodes          = var.min_nodes
+  max_nodes          = var.max_nodes
+  desired_size       = var.desired_size
+  admin_principal_arns = concat(
+    var.eks_admin_principal_arns,
+    [aws_iam_role.github_app_deployer.arn]
+  )
+  tags = local.tags
 }
 
 module "route53_zone" {
