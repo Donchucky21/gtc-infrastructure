@@ -15,3 +15,8 @@ output "external_secrets" {
     iam_policy_arn       = module.external_secrets.iam_policy_arn
   }
 }
+
+output "github_app_deployer_role_arn" {
+  description = "IAM role used by the application GitHub Actions workflow"
+  value       = aws_iam_role.github_app_deployer.arn
+}
