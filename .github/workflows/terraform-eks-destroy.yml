@@ -3,13 +3,15 @@ name: Destroy EKS Infrastructure
 on:
   workflow_dispatch:
     inputs:
-      mode: plan
+      mode:
         description: "Select plan first, then destroy"
         required: true
         type: choice
+        default: plan
         options:
           - plan
           - destroy
+
       confirmation:
         description: "For destroy, type: DESTROY chucky-infra-prod"
         required: false
@@ -68,7 +70,7 @@ jobs:
           allowed-account-ids: "304650806285"
 
       - name: Terraform init
-        run: terraform init -input=false
+        run: terraform init -input=false -reconfigure
 
       - name: Create destroy plan
         run: |
