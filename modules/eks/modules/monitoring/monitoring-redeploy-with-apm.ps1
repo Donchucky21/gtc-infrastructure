@@ -210,8 +210,6 @@ config:
     telemetry:
       logs:
         level: info
-      metrics:
-        address: 0.0.0.0:8888
     pipelines:
       traces:
         receivers: [otlp]
