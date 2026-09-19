@@ -1,0 +1,100 @@
+name: Destroy EKS Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode: plan
+        description: "Select plan first, then destroy"
+        required: true
+        type: choice
+        options:
+          - plan
+          - destroy
+      confirmation:
+        description: "For destroy, type: DESTROY chucky-infra-prod"
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-eks
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-2
+  EKS_CLUSTER_NAME: chucky-infra-prod
+  TF_WORKING_DIR: workspaces/eks
+
+jobs:
+  destroy:
+    name: Terraform EKS Destroy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # Prevent destruction from another branch
+    if: github.ref == 'refs/heads/main'
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: workspaces/eks
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Verify confirmation
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [ "$MODE" = "destroy" ] &&
+             [ "$CONFIRMATION" != "DESTROY chucky-infra-prod" ]; then
+            echo "Incorrect confirmation phrase."
+            exit 1
+          fi
+
+      - name: Configure Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::304650806285:role/gtc-terraform-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "304650806285"
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Create destroy plan
+        run: |
+          terraform plan \
+            -destroy \
+            -input=false \
+            -var-file=values.tfvars \
+            -out=destroy.tfplan
+
+      - name: Remove application resources
+        if: inputs.mode == 'destroy'
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER_NAME"
+
+          kubectl cluster-info
+
+          if kubectl get namespace incident-portal >/dev/null 2>&1; then
+            kubectl delete namespace incident-portal \
+              --wait=true \
+              --timeout=10m
+          else
+            echo "incident-portal namespace does not exist."
+          fi
+
+      - name: Destroy EKS infrastructure
+        if: inputs.mode == 'destroy'
+        run: terraform apply -input=false destroy.tfplan
