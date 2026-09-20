@@ -80,21 +80,24 @@ jobs:
             -var-file=values.tfvars \
             -out=destroy.tfplan
 
-      - name: Remove application resources
-        if: inputs.mode == 'destroy'
+      - name: Remove Kubernetes resources if cluster exists
+        if: ${{ inputs.mode == 'destroy' }}
+        shell: bash
         run: |
-          aws eks update-kubeconfig \
-            --region "$AWS_REGION" \
-            --name "$EKS_CLUSTER_NAME"
+          if aws eks describe-cluster \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
 
-          kubectl cluster-info
+            aws eks update-kubeconfig \
+              --name "$EKS_CLUSTER_NAME" \
+              --region "$AWS_REGION"
 
-          if kubectl get namespace incident-portal >/dev/null 2>&1; then
             kubectl delete namespace incident-portal \
+              --ignore-not-found=true \
               --wait=true \
               --timeout=10m
           else
-            echo "incident-portal namespace does not exist."
+            echo "EKS cluster no longer exists; skipping Kubernetes cleanup."
           fi
 
       - name: Destroy EKS infrastructure
