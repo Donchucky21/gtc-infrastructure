@@ -1,6 +1,6 @@
 locals {
   region      = var.region
-  client      = "ap-infra"
+  client      = "chucky-infra"
   environment = var.environment
   name        = "${local.client}-${local.environment}"
   tags = {
@@ -10,26 +10,29 @@ locals {
   }
 }
 
-# module "vpc" {
-#   source = "../../modules/vpc"
+module "vpc" {
+  source = "../../modules/vpc"
 
-#   name     = local.name
-#   vpc_cidr = var.vpc_cidr
-#   tags     = local.tags
-# }
+  name     = local.name
+  vpc_cidr = var.vpc_cidr
+  tags     = local.tags
+}
 
 module "eks" {
   source = "../../modules/eks"
 
-  cluster_name         = local.name
-  kubernetes_version   = var.eks_cluster_version
-  vpc_id               = "vpc-0c03955c56c103755"
-  subnet_ids           = ["subnet-07f45113a08dd0a02", "subnet-015c20ac1020f0154"]
-  min_nodes            = var.min_nodes
-  max_nodes            = var.max_nodes
-  desired_size         = var.desired_size
-  admin_principal_arns = var.eks_admin_principal_arns
-  tags                 = local.tags
+  cluster_name       = local.name
+  kubernetes_version = var.eks_cluster_version
+  vpc_id             = module.vpc.vpc_id
+  subnet_ids         = module.vpc.private_subnets
+  min_nodes          = var.min_nodes
+  max_nodes          = var.max_nodes
+  desired_size       = var.desired_size
+  admin_principal_arns = concat(
+    var.eks_admin_principal_arns,
+    [aws_iam_role.github_app_deployer.arn]
+  )
+  tags = local.tags
 }
 
 module "route53_zone" {
