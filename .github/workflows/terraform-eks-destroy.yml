@@ -17,6 +17,18 @@ on:
         required: false
         type: string
 
+  workflow_call:
+    inputs:
+      mode:
+        description: "Run a destroy plan or apply the destruction"
+        required: true
+        type: string
+
+      confirmation:
+        description: "Required destruction confirmation"
+        required: true
+        type: string
+
 permissions:
   id-token: write
   contents: read

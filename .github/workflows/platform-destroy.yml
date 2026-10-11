@@ -1,0 +1,310 @@
+name: Platform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type: DESTROY chucky-infra-prod"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: platform-lifecycle
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'chucky-infra-prod' }}
+  TF_WORKING_DIR: workspaces/argocd
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_region: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  TF_VAR_eks_cluster_name: ${{ vars.EKS_CLUSTER_NAME || 'chucky-infra-prod' }}
+  TF_VAR_zone: ${{ vars.ROUTE53_ZONE || 'starttechapp.uk' }}
+  TF_VAR_argocd_hostname: ${{ vars.ARGOCD_HOSTNAME || 'argocd.starttechapp.uk' }}
+  TF_VAR_github_account: ${{ vars.ARGOCD_GITHUB_ACCOUNT || 'Donchucky21' }}
+  TF_VAR_github_repository_url: ${{ vars.ARGOCD_GITHUB_REPOSITORY_URL || 'https://github.com/Donchucky21/incident-management-portal.git' }}
+  TF_VAR_github_revision: ${{ vars.ARGOCD_GITHUB_REVISION || 'main' }}
+  TF_VAR_gitops_root_path: ${{ vars.ARGOCD_GITOPS_ROOT_PATH || 'gitops/argocd' }}
+  TF_VAR_ingress_certificate_arn: ${{ vars.ARGOCD_INGRESS_CERTIFICATE_ARN }}
+  TF_VAR_github_pat_token: ${{ secrets.ARGOCD_GITHUB_PAT_TOKEN }}
+
+jobs:
+  validate:
+    name: Validate destruction request
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify branch and confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Platform destruction can only run from main."
+            exit 1
+          fi
+
+          if [ "$CONFIRMATION" != "DESTROY chucky-infra-prod" ]; then
+            echo "Incorrect confirmation phrase."
+            exit 1
+          fi
+
+  cleanup-kubernetes:
+    name: Remove Kubernetes resources
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "304650806285"
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Connect to EKS
+        run: |
+          aws eks describe-cluster \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Delete Argo CD applications
+        run: |
+          if kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
+            kubectl delete applications.argoproj.io \
+              --all \
+              --namespace argocd \
+              --ignore-not-found=true \
+              --wait=true \
+              --timeout=15m
+          else
+            echo "Argo CD Application CRD not found."
+          fi
+
+      - name: Delete ingresses and load balancer services
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl delete ingress \
+            --all \
+            --all-namespaces \
+            --ignore-not-found=true \
+            --wait=true \
+            --timeout=15m
+
+          while IFS=$'\t' read -r namespace service; do
+            if [ -n "$namespace" ] && [ -n "$service" ]; then
+              kubectl delete service "$service" \
+                --namespace "$namespace" \
+                --wait=true \
+                --timeout=10m
+            fi
+          done < <(
+            kubectl get services --all-namespaces -o json |
+              jq -r '.items[] |
+                select(.spec.type == "LoadBalancer") |
+                [.metadata.namespace, .metadata.name] |
+                @tsv'
+          )
+
+      - name: Delete Kubernetes persistent storage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t volume_ids < <(
+            kubectl get pv -o json |
+              jq -r '.items[] |
+                select(.spec.csi.driver? == "ebs.csi.aws.com") |
+                .spec.csi.volumeHandle'
+          )
+
+          while read -r pv; do
+            if [ -n "$pv" ]; then
+              kubectl patch pv "$pv" \
+                --type merge \
+                -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
+            fi
+          done < <(
+            kubectl get pv -o json |
+              jq -r '.items[] |
+                select(.spec.csi.driver? == "ebs.csi.aws.com") |
+                .metadata.name'
+          )
+
+          kubectl delete pvc \
+            --all \
+            --all-namespaces \
+            --ignore-not-found=true \
+            --wait=true \
+            --timeout=15m
+
+          kubectl delete pv \
+            --all \
+            --ignore-not-found=true \
+            --wait=true \
+            --timeout=15m
+
+          remaining=("${volume_ids[@]}")
+
+          for _ in {1..60}; do
+            next=()
+
+            for volume_id in "${remaining[@]}"; do
+              if aws ec2 describe-volumes \
+                --region "$AWS_REGION" \
+                --volume-ids "$volume_id" >/dev/null 2>&1; then
+                next+=("$volume_id")
+              fi
+            done
+
+            remaining=("${next[@]}")
+
+            if [ "${#remaining[@]}" -eq 0 ]; then
+              echo "All EBS volumes created by the cluster have been deleted."
+              exit 0
+            fi
+
+            echo "Waiting for EBS volumes: ${remaining[*]}"
+            sleep 10
+          done
+
+          echo "EBS volumes were not deleted: ${remaining[*]}"
+          exit 1
+
+      - name: Wait for Kubernetes load balancers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for _ in {1..60}; do
+            count="$(aws resourcegroupstaggingapi get-resources \
+              --region "$AWS_REGION" \
+              --resource-type-filters elasticloadbalancing:loadbalancer \
+              --tag-filters "Key=elbv2.k8s.aws/cluster,Values=$EKS_CLUSTER_NAME" \
+              --query 'length(ResourceTagMappingList)' \
+              --output text)"
+
+            if [ "$count" = "0" ]; then
+              echo "All Kubernetes load balancers have been deleted."
+              exit 0
+            fi
+
+            echo "Waiting for $count Kubernetes load balancer(s) to be deleted."
+            sleep 10
+          done
+
+          echo "Timed out waiting for Kubernetes load balancers."
+          exit 1
+
+  destroy-argocd:
+    name: Destroy Argo CD
+    needs: cleanup-kubernetes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "304650806285"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      - name: Configure kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false -reconfigure
+
+      - name: Create Argo CD destroy plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -destroy \
+            -input=false \
+            -no-color \
+            -out=argocd-destroy.tfplan
+
+      - name: Destroy Argo CD
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply \
+            -input=false \
+            -no-color \
+            -auto-approve \
+            argocd-destroy.tfplan
+
+  destroy-eks:
+    name: Destroy EKS infrastructure
+    needs: destroy-argocd
+    uses: ./.github/workflows/terraform-eks-destroy.yml
+    with:
+      mode: destroy
+      confirmation: "DESTROY chucky-infra-prod"
+    secrets: inherit
+
+  verify:
+    name: Verify destruction
+    needs: destroy-eks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "304650806285"
+
+      - name: Confirm EKS and load balancers are gone
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if aws eks describe-cluster \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "EKS cluster still exists."
+            exit 1
+          fi
+
+          count="$(aws resourcegroupstaggingapi get-resources \
+            --region "$AWS_REGION" \
+            --resource-type-filters elasticloadbalancing:loadbalancer \
+            --tag-filters "Key=elbv2.k8s.aws/cluster,Values=$EKS_CLUSTER_NAME" \
+            --query 'length(ResourceTagMappingList)' \
+            --output text)"
+
+          if [ "$count" != "0" ]; then
+            echo "$count Kubernetes load balancer(s) still exist."
+            exit 1
+          fi
+
+          echo "Platform destruction completed successfully."

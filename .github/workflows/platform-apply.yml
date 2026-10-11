@@ -1,0 +1,53 @@
+name: Platform Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type: DEPLOY chucky-infra-prod"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: platform-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate deployment request
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify branch and confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Platform deployment can only run from main."
+            exit 1
+          fi
+
+          if [ "$CONFIRMATION" != "DEPLOY chucky-infra-prod" ]; then
+            echo "Incorrect confirmation phrase."
+            exit 1
+          fi
+
+  deploy-eks:
+    name: Deploy EKS infrastructure
+    needs: validate
+    uses: ./.github/workflows/terraform-eks-apply.yml
+    with:
+      apply: true
+    secrets: inherit
+
+  deploy-argocd:
+    name: Deploy Argo CD
+    needs: deploy-eks
+    uses: ./.github/workflows/terraform-argocd-apply.yml
+    with:
+      apply: true
+    secrets: inherit
