@@ -9,6 +9,13 @@ on:
         default: false
         type: boolean
 
+  workflow_call:
+    inputs:
+      apply:
+        description: "Run terraform apply after plan"
+        required: true
+        type: boolean
+
 permissions:
   contents: read
   id-token: write
@@ -36,7 +43,7 @@ jobs:
       - name: Check required configuration
         shell: pwsh
         run: |
-          Write-Host "Apply requested: ${{ github.event.inputs.apply }}"
+          Write-Host "Apply requested: ${{ inputs.apply }}"
           $missing = @()
           if ([string]::IsNullOrWhiteSpace("${{ secrets.AWS_ROLE_TO_ASSUME }}")) { $missing += "secret AWS_ROLE_TO_ASSUME" }
           if ($missing.Count -gt 0) {
@@ -120,7 +127,7 @@ jobs:
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
 
       # - name: Clean failed Helm releases
-      #   if: ${{ github.event.inputs.apply == 'true' }}
+      #   if: ${{ inputs.apply }}
       #   shell: pwsh
       #   run: |
       #     $releases = @(
@@ -147,7 +154,7 @@ jobs:
       #     }
 
       - name: Terraform apply
-        if: ${{ github.event.inputs.apply == 'true' }}
+        if: ${{ inputs.apply == 'true' }}
         working-directory: ${{ env.TF_WORKING_DIR }}
         shell: pwsh
         run: |
@@ -158,5 +165,5 @@ jobs:
           }
 
       - name: Apply skipped
-        if: ${{ github.event.inputs.apply != 'true' }}
+        if: ${{ !inputs.apply }}
         run: echo "Terraform apply was skipped because workflow input apply was not true."
